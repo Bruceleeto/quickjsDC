@@ -28,6 +28,7 @@
 #include <inttypes.h>
 #include <string.h>
 #include <assert.h>
+#include <alloca.h>
 #include <sys/time.h>
 #include <time.h>
 #include <fenv.h>
@@ -1760,7 +1761,7 @@ static const JSMallocFunctions def_malloc_funcs = {
     (size_t (*)(const void *))malloc_usable_size,
 #else
     /* change this to `NULL,` if compilation fails */
-    malloc_usable_size,
+    NULL,
 #endif
 };
 
@@ -6194,8 +6195,10 @@ void JS_DumpMemoryUsage(FILE *fp, const JSMemoryUsage *s, JSRuntime *rt)
 #ifdef CONFIG_BIGNUM
             "BigNum "
 #endif
-            CONFIG_VERSION " version, %d-bit, malloc limit: %"PRId64"\n\n",
-            (int)sizeof(void *) * 8, (int64_t)(ssize_t)s->malloc_limit);
+            "%s version, %d-bit, malloc limit: %" PRId64 "\n\n",
+            CONFIG_VERSION,  // This should be a string
+            (int)sizeof(void *) * 8, 
+            (int64_t)(ssize_t)s->malloc_limit);
 #if 1
     if (rt) {
         static const struct {
@@ -11303,11 +11306,11 @@ static char *i64toa(char *buf_end, int64_t n, unsigned int base)
 static void js_ecvt1(double d, int n_digits, int *decpt, int *sign, char *buf,
                      int rounding_mode, char *buf1, int buf1_size)
 {
-    if (rounding_mode != FE_TONEAREST)
+    if (rounding_mode != 0)
         fesetround(rounding_mode);
     snprintf(buf1, buf1_size, "%+.*e", n_digits - 1, d);
-    if (rounding_mode != FE_TONEAREST)
-        fesetround(FE_TONEAREST);
+    if (rounding_mode != 0)
+        fesetround(0);
     *sign = (buf1[0] == '-');
     /* mantissa */
     buf[0] = buf1[1];
@@ -11336,7 +11339,7 @@ static int js_ecvt(double d, int n_digits, int *decpt, int *sign, char *buf,
         n_digits_max = 17;
         while (n_digits_min < n_digits_max) {
             n_digits = (n_digits_min + n_digits_max) / 2;
-            js_ecvt1(d, n_digits, decpt, sign, buf, FE_TONEAREST,
+            js_ecvt1(d, n_digits, decpt, sign, buf, 0,
                      buf_tmp, sizeof(buf_tmp));
             if (strtod(buf_tmp, NULL) == d) {
                 /* no need to keep the trailing zeros */
@@ -11348,34 +11351,12 @@ static int js_ecvt(double d, int n_digits, int *decpt, int *sign, char *buf,
             }
         }
         n_digits = n_digits_max;
-        rounding_mode = FE_TONEAREST;
+        rounding_mode = 0;
     } else {
-        rounding_mode = FE_TONEAREST;
+        rounding_mode = 0;
 #ifdef CONFIG_PRINTF_RNDN
-        {
-            char buf1[JS_DTOA_BUF_SIZE], buf2[JS_DTOA_BUF_SIZE];
-            int decpt1, sign1, decpt2, sign2;
-            /* The JS rounding is specified as round to nearest ties away
-               from zero (RNDNA), but in printf the "ties" case is not
-               specified (for example it is RNDN for glibc, RNDNA for
-               Windows), so we must round manually. */
-            js_ecvt1(d, n_digits + 1, &decpt1, &sign1, buf1, FE_TONEAREST,
-                     buf_tmp, sizeof(buf_tmp));
-            /* XXX: could use 2 digits to reduce the average running time */
-            if (buf1[n_digits] == '5') {
-                js_ecvt1(d, n_digits + 1, &decpt1, &sign1, buf1, FE_DOWNWARD,
-                         buf_tmp, sizeof(buf_tmp));
-                js_ecvt1(d, n_digits + 1, &decpt2, &sign2, buf2, FE_UPWARD,
-                         buf_tmp, sizeof(buf_tmp));
-                if (memcmp(buf1, buf2, n_digits + 1) == 0 && decpt1 == decpt2) {
-                    /* exact result: round away from zero */
-                    if (sign1)
-                        rounding_mode = FE_DOWNWARD;
-                    else
-                        rounding_mode = FE_UPWARD;
-                }
-            }
-        }
+
+
 #endif /* CONFIG_PRINTF_RNDN */
     }
     js_ecvt1(d, n_digits, decpt, sign, buf, rounding_mode,
@@ -11387,44 +11368,16 @@ static int js_fcvt1(char *buf, int buf_size, double d, int n_digits,
                     int rounding_mode)
 {
     int n;
-    if (rounding_mode != FE_TONEAREST)
-        fesetround(rounding_mode);
-    n = snprintf(buf, buf_size, "%.*f", n_digits, d);
-    if (rounding_mode != FE_TONEAREST)
-        fesetround(FE_TONEAREST);
-    assert(n < buf_size);
+
     return n;
 }
 
 static void js_fcvt(char *buf, int buf_size, double d, int n_digits)
 {
     int rounding_mode;
-    rounding_mode = FE_TONEAREST;
+    rounding_mode = 0;
 #ifdef CONFIG_PRINTF_RNDN
-    {
-        int n1, n2;
-        char buf1[JS_DTOA_BUF_SIZE];
-        char buf2[JS_DTOA_BUF_SIZE];
 
-        /* The JS rounding is specified as round to nearest ties away from
-           zero (RNDNA), but in printf the "ties" case is not specified
-           (for example it is RNDN for glibc, RNDNA for Windows), so we
-           must round manually. */
-        n1 = js_fcvt1(buf1, sizeof(buf1), d, n_digits + 1, FE_TONEAREST);
-        rounding_mode = FE_TONEAREST;
-        /* XXX: could use 2 digits to reduce the average running time */
-        if (buf1[n1 - 1] == '5') {
-            n1 = js_fcvt1(buf1, sizeof(buf1), d, n_digits + 1, FE_DOWNWARD);
-            n2 = js_fcvt1(buf2, sizeof(buf2), d, n_digits + 1, FE_UPWARD);
-            if (n1 == n2 && memcmp(buf1, buf2, n1) == 0) {
-                /* exact result: round away from zero */
-                if (buf1[0] == '-')
-                    rounding_mode = FE_DOWNWARD;
-                else
-                    rounding_mode = FE_UPWARD;
-            }
-        }
-    }
 #endif /* CONFIG_PRINTF_RNDN */
     js_fcvt1(buf, buf_size, d, n_digits, rounding_mode);
 }
@@ -42043,7 +41996,7 @@ static int getTimezoneOffset(int64_t time) {
     }
     ti = time;
     localtime_r(&ti, &tm);
-    return -tm.tm_gmtoff / 60;
+    return 0;
 #endif
 }
 
@@ -45243,10 +45196,6 @@ static int js_proxy_isArray(JSContext *ctx, JSValueConst obj)
     JSProxyData *s = JS_GetOpaque(obj, JS_CLASS_PROXY);
     if (!s)
         return FALSE;
-    if (js_check_stack_overflow(ctx->rt, 0)) {
-        JS_ThrowStackOverflow(ctx);
-        return -1;
-    }
     if (s->is_revoked) {
         JS_ThrowTypeErrorRevokedProxy(ctx);
         return -1;
